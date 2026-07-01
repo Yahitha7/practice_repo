@@ -1,2 +1,10 @@
 ---
-- name: Helo 
+- name: My first automation play
+  hosts: all
+  tasks:
+    - name: Ping the managed hosts
+      ansible.builtin.ping:
+
+    - name: Print a custom message
+      ansible.builtin.debug:
+        msg: "Hello World! Your simple playbook is working."
