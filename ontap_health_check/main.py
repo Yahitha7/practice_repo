@@ -15,6 +15,9 @@ def main():
     username = credentials["username"]
     password = credentials["password"]
 
+    # Dictionary to store results from all ONTAP clusters
+    all_results = {}
+
     # Connect to each ONTAP controller
     for controller in controllers:
 
@@ -27,7 +30,10 @@ def main():
 
             print("✅ Connected Successfully\n")
 
-            # Execute all commands from commands.txt
+            # Dictionary to store one controller's command outputs
+            cluster_results = {}
+
+            # Execute all commands
             for command in commands:
 
                 print("-" * 60)
@@ -36,8 +42,15 @@ def main():
 
                 output = execute_command(ssh, command)
 
+                # Store command output
+                cluster_results[command] = output
+
+                # Display output on terminal
                 print(output)
                 print()
+
+            # Save this controller's results
+            all_results[controller] = cluster_results
 
             ssh.close()
             print("SSH Connection Closed.\n")
@@ -45,6 +58,19 @@ def main():
         except Exception as e:
             print(f"❌ Connection Failed: {e}")
 
+    # Display summary
+    print("\n" + "=" * 60)
+    print("ONTAP Health Check Summary")
+    print("=" * 60)
+
+    for controller, results in all_results.items():
+        print(f"Cluster : {controller}")
+        print(f"Commands Executed : {len(results)}")
+        print("-" * 60)
+
+    # Return results for HTML report generation
+    return all_results
+
 
 if __name__ == "__main__":
-    main()
+    results = main()
