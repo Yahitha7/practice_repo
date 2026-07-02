@@ -1,17 +1,23 @@
 from config import load_credentials
 from config import load_controllers
-from config import load_commands
+from ssh_connection import connect_ontap
 
 credentials = load_credentials()
 controllers = load_controllers()
-commands = load_commands()
 
-print("Username :", credentials["username"])
+username = credentials["username"]
+password = credentials["password"]
 
-print("\nControllers:")
 for controller in controllers:
-    print(controller)
 
-print("\nCommands:")
-for command in commands:
-    print(command)
+    print(f"Connecting to {controller}...")
+
+    ssh = connect_ontap(
+        controller,
+        username,
+        password
+    )
+
+    print("Connection Successful!")
+
+    ssh.close()
