@@ -2,27 +2,20 @@ import os
 from datetime import datetime
 
 import pandas as pd
-
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from openpyxl.worksheet.table import Table, TableStyleInfo
+import xlsxwriter
 
 
 # ============================================================
-# PATH CONFIGURATION
+# CONFIGURATION
 # ============================================================
 
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
-HISTORY_DIR = os.path.join(
-    BASE_DIR,
-    "history"
-)
-
 HISTORY_FILE = os.path.join(
-    HISTORY_DIR,
+    BASE_DIR,
+    "history",
     "daily_capacity.csv"
 )
 
@@ -31,48 +24,19 @@ OUTPUT_DIR = os.path.join(
     "output"
 )
 
-
-# ============================================================
-# WEEKLY CONFIGURATION
-# ============================================================
-
 NUMBER_OF_WEEKS = 4
 
-# Backup team thresholds
 TH_LOW = 0.30
 TH_HIGH = 0.85
 
-
-# ============================================================
-# EXCEL STYLES
-# ============================================================
-
-HEADER_FILL = PatternFill(
-    fill_type="solid",
-    fgColor="D9EAF7"
-)
-
-HEADER_FONT = Font(
-    bold=True,
-    color="000000"
-)
-
-TITLE_FONT = Font(
-    bold=True,
-    size=14
-)
-
-THIN_SIDE = Side(
-    style="thin",
-    color="D9E1F2"
-)
-
-BORDER = Border(
-    left=THIN_SIDE,
-    right=THIN_SIDE,
-    top=THIN_SIDE,
-    bottom=THIN_SIDE
-)
+REGIONS = [
+    "NA",
+    "NA_DD",
+    "LATAM",
+    "EU",
+    "APAC",
+    "CHINA"
+]
 
 
 # ============================================================
@@ -88,11 +52,15 @@ def load_history():
             + HISTORY_FILE
         )
 
+    print()
     print(
         "Historical file used : "
         + HISTORY_FILE
     )
 
+    # IMPORTANT:
+    # keep_default_na=False prevents pandas from
+    # converting the Region value "NA" into NaN.
     df = pd.read_csv(
         HISTORY_FILE,
         keep_default_na=False
@@ -104,10 +72,6 @@ def load_history():
             "Historical file is empty: "
             + HISTORY_FILE
         )
-
-    # --------------------------------------------------------
-    # Required columns
-    # --------------------------------------------------------
 
     required_columns = [
         "Date",
@@ -145,16 +109,7 @@ def load_history():
     )
 
     # --------------------------------------------------------
-    # Used Capacity %
-    # --------------------------------------------------------
-
-    df["Used Capacity (%)"] = pd.to_numeric(
-        df["Used Capacity (%)"],
-        errors="coerce"
-    )
-
-    # --------------------------------------------------------
-    # Normalize text fields
+    # Text cleanup
     # --------------------------------------------------------
 
     for column in [
@@ -166,10 +121,91 @@ def load_history():
 
         df[column] = (
             df[column]
-            .fillna("")
             .astype(str)
             .str.strip()
         )
+
+    # --------------------------------------------------------
+    # Fix any old NA values that may already exist
+    # --------------------------------------------------------
+
+    try:
+
+        from cluster_mapping import CLUSTER_MAPPING
+
+        for index in df.index:
+
+            cluster = df.at[
+                index,
+                "Cluster"
+            ]
+
+            region = df.at[
+                index,
+                "Region"
+            ]
+
+            if (
+                not region
+                or region.lower() == "nan"
+            ):
+
+                mapping = CLUSTER_MAPPING.get(
+                    cluster
+                )
+
+                if mapping:
+
+                    df.at[
+                        index,
+                        "Region"
+                    ] = mapping.get(
+                        "Region",
+                        ""
+                    )
+
+                    if not df.at[
+                        index,
+                        "Country"
+                    ]:
+
+                        df.at[
+                            index,
+                            "Country"
+                        ] = mapping.get(
+                            "Country",
+                            ""
+                        )
+
+                    if not df.at[
+                        index,
+                        "City"
+                    ]:
+
+                        df.at[
+                            index,
+                            "City"
+                        ] = mapping.get(
+                            "City",
+                            ""
+                        )
+
+    except ImportError:
+
+        pass
+
+    # --------------------------------------------------------
+    # Used Capacity
+    # --------------------------------------------------------
+
+    df["Used Capacity (%)"] = pd.to_numeric(
+        df["Used Capacity (%)"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=["Used Capacity (%)"]
+    )
 
     # --------------------------------------------------------
     # Remove invalid clusters
@@ -180,18 +216,6 @@ def load_history():
         &
         (df["Cluster"].str.lower() != "nan")
     ]
-
-    # --------------------------------------------------------
-    # One record per cluster per day
-    # --------------------------------------------------------
-
-    df = df.drop_duplicates(
-        subset=[
-            "Date",
-            "Cluster"
-        ],
-        keep="last"
-    )
 
     # --------------------------------------------------------
     # Sort
@@ -206,6 +230,7 @@ def load_history():
         drop=True
     )
 
+    print()
     print(
         "Historical rows loaded : "
         + str(len(df))
@@ -221,183 +246,225 @@ def load_history():
         + str(df["Cluster"].nunique())
     )
 
+    print()
+
+    print("Regions:")
+
+    print(
+        df["Region"].value_counts(
+            dropna=False
+        )
+    )
+
     return df
 
 
 # ============================================================
-# BUILD WEEK INFORMATION
+# BUILD WEEKLY SNAPSHOTS
 # ============================================================
 
-def get_weekly_snapshots(df):
+def build_weekly_data(df):
 
-    data = df.copy()
+    working = df.copy()
 
     # --------------------------------------------------------
-    # Calculate week ending Sunday.
+    # Create a Monday-based week
     #
-    # Monday = 0
-    # Sunday = 6
+    # Every daily record is assigned to its Monday-Sunday
+    # reporting week.
     # --------------------------------------------------------
 
-    data["Week_End"] = (
-        data["Date"]
-        + pd.to_timedelta(
-            6 - data["Date"].dt.weekday,
+    working["Week_Start"] = (
+        working["Date"]
+        - pd.to_timedelta(
+            working["Date"].dt.weekday,
             unit="D"
         )
     )
 
-    data["Week_End"] = (
-        pd.to_datetime(
-            data["Week_End"]
+    working["Week_End"] = (
+        working["Week_Start"]
+        + pd.Timedelta(
+            days=6
         )
-        .dt.normalize()
     )
 
     # --------------------------------------------------------
-    # Available weeks
+    # Latest available snapshot for each cluster in each week
+    # --------------------------------------------------------
+
+    working = working.sort_values(
+        by=[
+            "Week_Start",
+            "Cluster",
+            "Date"
+        ]
+    )
+
+    weekly = (
+        working
+        .groupby(
+            [
+                "Week_Start",
+                "Cluster"
+            ],
+            as_index=False
+        )
+        .tail(1)
+        .copy()
+    )
+
+    # --------------------------------------------------------
+    # Keep only latest NUMBER_OF_WEEKS
     # --------------------------------------------------------
 
     available_weeks = sorted(
-        data["Week_End"]
-        .dropna()
-        .unique()
+        weekly["Week_Start"].unique()
     )
 
     selected_weeks = available_weeks[
         -NUMBER_OF_WEEKS:
     ]
 
-    # Convert to Timestamp explicitly
-    selected_weeks = [
-        pd.Timestamp(
-            week
-        ).normalize()
-        for week in selected_weeks
+    weekly = weekly[
+        weekly["Week_Start"].isin(
+            selected_weeks
+        )
+    ].copy()
+
+    # --------------------------------------------------------
+    # Use the actual latest snapshot date as the report column
+    #
+    # This avoids creating fake dates when history is incomplete.
+    # --------------------------------------------------------
+
+    weekly["Report Date"] = weekly[
+        "Date"
     ]
+
+    # --------------------------------------------------------
+    # Format date column
+    # --------------------------------------------------------
+
+    weekly["Week Label"] = weekly[
+        "Report Date"
+    ].apply(
+        format_excel_date
+    )
+
+    # --------------------------------------------------------
+    # Keep required columns
+    # --------------------------------------------------------
+
+    weekly = weekly[
+        [
+            "Cluster",
+            "Region",
+            "Country",
+            "City",
+            "Week_Start",
+            "Report Date",
+            "Week Label",
+            "Used Capacity (%)"
+        ]
+    ]
+
+    return weekly, selected_weeks
+
+
+# ============================================================
+# DATE FORMAT
+# ============================================================
+
+def format_excel_date(value):
+
+    timestamp = pd.Timestamp(
+        value
+    )
+
+    # Linux-safe replacement for %-d
+    day = str(
+        timestamp.day
+    )
+
+    month = timestamp.strftime(
+        "%b"
+    )
+
+    year = timestamp.strftime(
+        "%y"
+    )
 
     return (
-        data,
-        selected_weeks
+        day
+        + "-"
+        + month
+        + "-"
+        + year
     )
 
 
 # ============================================================
-# BUILD WEEKLY TABLE
+# BUILD REGIONAL TABLE
 # ============================================================
 
-def build_weekly_table(
-    data,
-    selected_weeks
+def build_region_table(
+    weekly,
+    region
 ):
 
-    if len(selected_weeks) == 0:
+    region_upper = region.upper()
+
+    # --------------------------------------------------------
+    # CHINA gets its own sheet based on Country
+    # --------------------------------------------------------
+
+    if region_upper == "CHINA":
+
+        region_data = weekly[
+            weekly["Country"]
+            .str.upper()
+            .eq("CHINA")
+        ].copy()
+
+    # --------------------------------------------------------
+    # NA_DD remains as an empty required sheet
+    # --------------------------------------------------------
+
+    elif region_upper == "NA_DD":
+
+        region_data = weekly.iloc[
+            0:0
+        ].copy()
+
+    # --------------------------------------------------------
+    # Normal regional sheets
+    # --------------------------------------------------------
+
+    else:
+
+        region_data = weekly[
+            weekly["Region"]
+            .str.upper()
+            .eq(region_upper)
+        ].copy()
+
+    if region_data.empty:
 
         return pd.DataFrame()
 
     # --------------------------------------------------------
-    # Normalize selected weeks
+    # Pivot dates into columns
     # --------------------------------------------------------
 
-    selected_weeks = [
-        pd.Timestamp(
-            week
-        ).normalize()
-        for week in selected_weeks
-    ]
-
-    weekly_records = []
-
-    # --------------------------------------------------------
-    # Process each week
-    # --------------------------------------------------------
-
-    for week_end in selected_weeks:
-
-        # Convert comparison column explicitly
-        week_dates = (
-            pd.to_datetime(
-                data["Week_End"]
-            )
-            .dt.normalize()
-        )
-
-        week_data = data[
-            week_dates == week_end
-        ].copy()
-
-        if week_data.empty:
-            continue
-
-        # ----------------------------------------------------
-        # Latest available snapshot for every cluster
-        # in that week
-        # ----------------------------------------------------
-
-        week_data = (
-            week_data
-            .sort_values(
-                "Date"
-            )
-            .groupby(
-                "Cluster",
-                as_index=False
-            )
-            .tail(1)
-        )
-
-        week_data = week_data[
-            [
-                "Cluster",
-                "Region",
-                "Country",
-                "City",
-                "Used Capacity (%)"
-            ]
-        ].copy()
-
-        week_data["Week_End"] = week_end
-
-        weekly_records.append(
-            week_data
-        )
-
-    if not weekly_records:
-
-        return pd.DataFrame()
-
-    # --------------------------------------------------------
-    # Combine all weekly records
-    # --------------------------------------------------------
-
-    weekly_data = pd.concat(
-        weekly_records,
-        ignore_index=True
-    )
-
-    # --------------------------------------------------------
-    # City Location
-    # --------------------------------------------------------
-
-    weekly_data["City Location"] = (
-        weekly_data["City"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    # --------------------------------------------------------
-    # Pivot weekly percentages
-    # --------------------------------------------------------
-
-    pivot = weekly_data.pivot_table(
+    pivot = region_data.pivot_table(
         index=[
             "Cluster",
             "Region",
             "Country",
-            "City Location"
+            "City"
         ],
-        columns="Week_End",
+        columns="Report Date",
         values="Used Capacity (%)",
         aggfunc="last"
     ).reset_index()
@@ -405,97 +472,12 @@ def build_weekly_table(
     pivot.columns.name = None
 
     # --------------------------------------------------------
-    # Detect and rename datetime columns
-    #
-    # This avoids the previous Period/Timestamp comparison
-    # problem.
-    # --------------------------------------------------------
-
-    week_column_map = {}
-
-    for column in list(
-        pivot.columns
-    ):
-
-        try:
-
-            column_date = pd.Timestamp(
-                column
-            ).normalize()
-
-        except Exception:
-
-            continue
-
-        for week in selected_weeks:
-
-            if column_date == week:
-
-                formatted_name = (
-                    week.strftime(
-                        "%d-%b-%y"
-                    )
-                )
-
-                week_column_map[
-                    column
-                ] = formatted_name
-
-                break
-
-    pivot = pivot.rename(
-        columns=week_column_map
-    )
-
-    # --------------------------------------------------------
-    # Determine actual week columns
-    # --------------------------------------------------------
-
-    week_columns = []
-
-    for week in selected_weeks:
-
-        formatted_name = (
-            week.strftime(
-                "%d-%b-%y"
-            )
-        )
-
-        if formatted_name in pivot.columns:
-
-            week_columns.append(
-                formatted_name
-            )
-
-    # --------------------------------------------------------
-    # Final columns
-    #
-    # Cluster/Region/Country are retained internally so
-    # regional sheets can be created correctly.
-    # --------------------------------------------------------
-
-    result_columns = [
-        "Cluster",
-        "Region",
-        "Country",
-        "City Location"
-    ]
-
-    result_columns.extend(
-        week_columns
-    )
-
-    pivot = pivot[
-        result_columns
-    ]
-
-    # --------------------------------------------------------
-    # Sort
+    # Sort cities
     # --------------------------------------------------------
 
     pivot = pivot.sort_values(
         by=[
-            "City Location",
+            "City",
             "Cluster"
         ]
     ).reset_index(
@@ -506,36 +488,140 @@ def build_weekly_table(
 
 
 # ============================================================
+# CREATE EXCEL FORMAT OBJECTS
+# ============================================================
+
+def create_formats(workbook):
+
+    formats = {}
+
+    formats["title"] = workbook.add_format({
+        "bold": True,
+        "font_size": 14
+    })
+
+    formats["blue_header"] = workbook.add_format({
+        "bold": True,
+        "bg_color": "#D9EAF7",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter"
+    })
+
+    formats["blue_cell"] = workbook.add_format({
+        "bg_color": "#D9EAF7",
+        "border": 1
+    })
+
+    formats["normal"] = workbook.add_format({
+        "border": 1
+    })
+
+    formats["percent"] = workbook.add_format({
+        "border": 1,
+        "num_format": "0%"
+    })
+
+    formats["percent_bold"] = workbook.add_format({
+        "border": 1,
+        "bold": True,
+        "num_format": "0%"
+    })
+
+    formats["date_percent"] = workbook.add_format({
+        "border": 1,
+        "num_format": "0%"
+    })
+
+    formats["raw_header"] = workbook.add_format({
+        "bold": True,
+        "bg_color": "#1F4E78",
+        "font_color": "white",
+        "border": 1,
+        "align": "center"
+    })
+
+    formats["raw_normal"] = workbook.add_format({
+        "border": 1
+    })
+
+    formats["raw_percent"] = workbook.add_format({
+        "border": 1,
+        "num_format": "0.00%"
+    })
+
+    return formats
+
+
+# ============================================================
 # CREATE REGIONAL SHEET
 # ============================================================
 
 def create_region_sheet(
-    wb,
-    region_data,
-    region_name,
-    week_columns,
-    table_number
+    workbook,
+    formats,
+    region,
+    region_table,
+    week_labels
 ):
 
-    ws = wb.create_sheet(
-        title=region_name
+    ws = workbook.add_worksheet(
+        region
     )
 
     # --------------------------------------------------------
-    # Title
+    # Top filters
     # --------------------------------------------------------
 
-    ws["A1"] = (
-        "Rubrik Weekly Capacity Growth"
+    ws.write(
+        "A1",
+        "Region",
+        formats["blue_cell"]
     )
 
-    ws["A1"].font = TITLE_FONT
+    ws.write(
+        "B1",
+        region,
+        formats["blue_cell"]
+    )
+
+    ws.write(
+        "A2",
+        "Type (Avamar/Netbackup/Rubrik)",
+        formats["blue_cell"]
+    )
+
+    ws.write(
+        "B2",
+        "(All)",
+        formats["blue_cell"]
+    )
 
     # --------------------------------------------------------
-    # Headers
+    # Main heading
     # --------------------------------------------------------
 
-    start_row = 3
+    ws.write(
+        "A5",
+        "Sum of Used Capacity (%)",
+        formats["title"]
+    )
+
+    # --------------------------------------------------------
+    # Month heading
+    # --------------------------------------------------------
+
+    if week_labels:
+
+        ws.write(
+            "D5",
+            "Month",
+            formats["title"]
+        )
+
+    # --------------------------------------------------------
+    # Main table headers
+    # --------------------------------------------------------
 
     headers = [
         "City Location",
@@ -544,282 +630,643 @@ def create_region_sheet(
     ]
 
     headers.extend(
-        week_columns
+        week_labels
     )
 
-    for column_number, header in enumerate(
-        headers,
-        start=1
+    header_row = 5
+
+    for column, header in enumerate(
+        headers
     ):
 
-        cell = ws.cell(
-            row=start_row,
-            column=column_number,
-            value=header
-        )
-
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.border = BORDER
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
+        ws.write(
+            header_row,
+            column,
+            header,
+            formats["blue_header"]
         )
 
     # --------------------------------------------------------
-    # Data rows
+    # Main table data
     # --------------------------------------------------------
 
-    row_number = start_row + 1
+    if not region_table.empty:
 
-    for _, row in region_data.iterrows():
-
-        values = [
-            row["City Location"],
-            TH_LOW,
-            TH_HIGH
-        ]
-
-        for week_column in week_columns:
-
-            value = row.get(
-                week_column,
-                None
-            )
-
-            values.append(
-                value
-            )
-
-        for column_number, value in enumerate(
-            values,
-            start=1
+        for row_number in range(
+            len(region_table)
         ):
 
-            cell = ws.cell(
-                row=row_number,
-                column=column_number,
-                value=value
+            excel_row = (
+                header_row
+                + 1
+                + row_number
             )
 
-            cell.border = BORDER
+            city = region_table.iloc[
+                row_number
+            ]["City"]
 
-            cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center"
+            if not city:
+
+                city = region_table.iloc[
+                    row_number
+                ]["Cluster"]
+
+            ws.write(
+                excel_row,
+                0,
+                city,
+                formats["normal"]
             )
 
-            # ------------------------------------------------
-            # Threshold + capacity columns are percentages
-            # ------------------------------------------------
+            ws.write(
+                excel_row,
+                1,
+                TH_LOW,
+                formats["percent_bold"]
+            )
 
-            if column_number >= 2:
+            ws.write(
+                excel_row,
+                2,
+                TH_HIGH,
+                formats["percent_bold"]
+            )
 
-                cell.number_format = "0%"
+            for week_index, week in enumerate(
+                week_labels
+            ):
 
-        row_number += 1
+                # Find the actual column in the pivot
+                date_column = None
+
+                for column in region_table.columns:
+
+                    if isinstance(
+                        column,
+                        pd.Timestamp
+                    ):
+
+                        if format_excel_date(
+                            column
+                        ) == week:
+
+                            date_column = column
+                            break
+
+                    elif hasattr(
+                        column,
+                        "strftime"
+                    ):
+
+                        if format_excel_date(
+                            column
+                        ) == week:
+
+                            date_column = column
+                            break
+
+                value = None
+
+                if date_column is not None:
+
+                    value = region_table.iloc[
+                        row_number
+                    ][date_column]
+
+                if pd.notna(value):
+
+                    ws.write(
+                        excel_row,
+                        3 + week_index,
+                        float(value),
+                        formats["percent"]
+                    )
+
+                else:
+
+                    ws.write_blank(
+                        excel_row,
+                        3 + week_index,
+                        None,
+                        formats["percent"]
+                    )
 
     # --------------------------------------------------------
-    # Excel table
+    # Right-side chart source table
     # --------------------------------------------------------
 
-    if row_number > start_row + 1:
+    right_col = 9
 
-        last_column = len(headers)
+    for column, header in enumerate(
+        headers,
+        start=right_col
+    ):
 
-        last_column_letter = (
-            ws.cell(
-                row=start_row,
-                column=last_column
-            ).column_letter
+        ws.write(
+            header_row,
+            column,
+            header,
+            formats["blue_header"]
         )
 
-        table_ref = (
-            "A"
-            + str(start_row)
-            + ":"
-            + last_column_letter
-            + str(row_number - 1)
-        )
+    if not region_table.empty:
 
-        table = Table(
-            displayName=(
-                "WeeklyTable"
-                + str(table_number)
-            ),
-            ref=table_ref
-        )
+        for row_number in range(
+            len(region_table)
+        ):
 
-        table_style = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False
-        )
+            excel_row = (
+                header_row
+                + 1
+                + row_number
+            )
 
-        table.tableStyleInfo = table_style
+            city = region_table.iloc[
+                row_number
+            ]["City"]
 
-        ws.add_table(
-            table
-        )
+            if not city:
+
+                city = region_table.iloc[
+                    row_number
+                ]["Cluster"]
+
+            ws.write(
+                excel_row,
+                right_col,
+                city,
+                formats["normal"]
+            )
+
+            ws.write(
+                excel_row,
+                right_col + 1,
+                TH_LOW,
+                formats["percent_bold"]
+            )
+
+            ws.write(
+                excel_row,
+                right_col + 2,
+                TH_HIGH,
+                formats["percent_bold"]
+            )
+
+            for week_index, week in enumerate(
+                week_labels
+            ):
+
+                date_column = None
+
+                for column in region_table.columns:
+
+                    if hasattr(
+                        column,
+                        "strftime"
+                    ):
+
+                        if format_excel_date(
+                            column
+                        ) == week:
+
+                            date_column = column
+                            break
+
+                value = None
+
+                if date_column is not None:
+
+                    value = region_table.iloc[
+                        row_number
+                    ][date_column]
+
+                if pd.notna(value):
+
+                    ws.write(
+                        excel_row,
+                        right_col
+                        + 3
+                        + week_index,
+                        float(value),
+                        formats["percent"]
+                    )
+
+                else:
+
+                    ws.write_blank(
+                        excel_row,
+                        right_col
+                        + 3
+                        + week_index,
+                        None,
+                        formats["percent"]
+                    )
 
     # --------------------------------------------------------
     # Column widths
     # --------------------------------------------------------
 
-    ws.column_dimensions[
-        "A"
-    ].width = 25
+    ws.set_column(
+        "A:A",
+        18
+    )
 
-    ws.column_dimensions[
-        "B"
-    ].width = 14
+    ws.set_column(
+        "B:G",
+        12
+    )
 
-    ws.column_dimensions[
-        "C"
-    ].width = 14
+    ws.set_column(
+        "J:J",
+        18
+    )
 
-    for column_number in range(
-        4,
-        len(headers) + 1
+    ws.set_column(
+        "K:P",
+        12
+    )
+
+    # --------------------------------------------------------
+    # Freeze panes
+    # --------------------------------------------------------
+
+    ws.freeze_panes(
+        6,
+        0
+    )
+
+    # --------------------------------------------------------
+    # Chart
+    # --------------------------------------------------------
+
+    if region_table.empty:
+
+        return ws
+
+    number_of_cities = len(
+        region_table
+    )
+
+    if number_of_cities == 0:
+
+        return ws
+
+    chart = workbook.add_chart({
+        "type": "column"
+    })
+
+    # --------------------------------------------------------
+    # Bar colors
+    # --------------------------------------------------------
+
+    chart_colors = [
+        "#5B9BD5",
+        "#9DC3E6",
+        "#BDD7EE",
+        "#DDEBF7"
+    ]
+
+    # --------------------------------------------------------
+    # Weekly capacity series
+    # --------------------------------------------------------
+
+    for index, week in enumerate(
+        week_labels
     ):
 
-        column_letter = (
-            ws.cell(
-                row=start_row,
-                column=column_number
-            ).column_letter
-        )
+        chart.add_series({
 
-        ws.column_dimensions[
-            column_letter
-        ].width = 15
+            "name": [
+                region,
+                header_row,
+                right_col + 3 + index
+            ],
+
+            "categories": [
+                region,
+                header_row + 1,
+                right_col,
+                header_row + number_of_cities,
+                right_col
+            ],
+
+            "values": [
+                region,
+                header_row + 1,
+                right_col + 3 + index,
+                header_row + number_of_cities,
+                right_col + 3 + index
+            ],
+
+            "fill": {
+                "color": chart_colors[
+                    index
+                    % len(chart_colors)
+                ]
+            },
+
+            "border": {
+                "color": chart_colors[
+                    index
+                    % len(chart_colors)
+                ]
+            },
+
+            "data_labels": {
+                "value": True,
+                "num_format": "0%"
+            }
+        })
 
     # --------------------------------------------------------
-    # Freeze
+    # Low threshold line
     # --------------------------------------------------------
 
-    ws.freeze_panes = "D4"
+    line_chart = workbook.add_chart({
+        "type": "line"
+    })
+
+    line_chart.add_series({
+
+        "name": [
+            region,
+            header_row,
+            right_col + 1
+        ],
+
+        "categories": [
+            region,
+            header_row + 1,
+            right_col,
+            header_row + number_of_cities,
+            right_col
+        ],
+
+        "values": [
+            region,
+            header_row + 1,
+            right_col + 1,
+            header_row + number_of_cities,
+            right_col + 1
+        ],
+
+        "line": {
+            "color": "#00B050",
+            "width": 2.25
+        },
+
+        "marker": {
+            "type": "none"
+        }
+    })
+
+    # --------------------------------------------------------
+    # High threshold line
+    # --------------------------------------------------------
+
+    line_chart.add_series({
+
+        "name": [
+            region,
+            header_row,
+            right_col + 2
+        ],
+
+        "categories": [
+            region,
+            header_row + 1,
+            right_col,
+            header_row + number_of_cities,
+            right_col
+        ],
+
+        "values": [
+            region,
+            header_row + 1,
+            right_col + 2,
+            header_row + number_of_cities,
+            right_col + 2
+        ],
+
+        "line": {
+            "color": "#FF0000",
+            "width": 2.25
+        },
+
+        "marker": {
+            "type": "none"
+        }
+    })
+
+    # --------------------------------------------------------
+    # Combine charts
+    # --------------------------------------------------------
+
+    chart.combine(
+        line_chart
+    )
+
+    chart.set_title({
+        "name": ""
+    })
+
+    chart.set_legend({
+        "position": "top"
+    })
+
+    chart.set_y_axis({
+
+        "num_format": "0%",
+
+        "min": 0,
+
+        "max": 1,
+
+        "major_unit": 0.25,
+
+        "major_gridlines": {
+            "visible": True,
+            "line": {
+                "color": "#D9D9D9"
+            }
+        }
+    })
+
+    # IMPORTANT:
+    # City names appear underneath the bars.
+
+    chart.set_x_axis({
+
+        "name": "",
+
+        "label_position": "low",
+
+        "num_font": {
+            "size": 8
+        }
+    })
+
+    chart.set_plotarea({
+
+        "border": {
+            "color": "#FFFFFF"
+        },
+
+        "fill": {
+            "color": "#FFFFFF"
+        }
+    })
+
+    chart.set_chartarea({
+
+        "border": {
+            "color": "#D9D9D9"
+        },
+
+        "fill": {
+            "color": "#FFFFFF"
+        }
+    })
+
+    # --------------------------------------------------------
+    # Insert chart
+    # --------------------------------------------------------
+
+    ws.insert_chart(
+        "E14",
+        chart,
+        {
+            "x_scale": 1.45,
+            "y_scale": 1.35
+        }
+    )
 
     return ws
 
 
 # ============================================================
-# CREATE RAW DATA SHEET
+# RAW DATA SHEET
 # ============================================================
 
 def create_raw_data_sheet(
-    wb,
+    workbook,
+    formats,
     history
 ):
 
-    ws = wb.create_sheet(
-        title="Raw Data"
+    ws = workbook.add_worksheet(
+        "Raw Data"
     )
 
-    raw_data = history.copy()
-
-    # --------------------------------------------------------
-    # Excel-safe date values
-    # --------------------------------------------------------
-
-    raw_data["Date"] = (
-        pd.to_datetime(
-            raw_data["Date"]
-        )
-        .dt.strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    raw_data["Week_End"] = (
-        pd.to_datetime(
-            raw_data["Week_End"]
-        )
-        .dt.strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    # --------------------------------------------------------
-    # Headers
-    # --------------------------------------------------------
-
-    headers = list(
-        raw_data.columns
-    )
+    columns = [
+        "Date",
+        "Cluster",
+        "Region",
+        "Country",
+        "City",
+        "Used Capacity (%)"
+    ]
 
     for column_number, header in enumerate(
-        headers,
-        start=1
+        columns
     ):
 
-        cell = ws.cell(
-            row=1,
-            column=column_number,
-            value=header
+        ws.write(
+            0,
+            column_number,
+            header,
+            formats["raw_header"]
         )
 
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.border = BORDER
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center"
-        )
-
-    # --------------------------------------------------------
-    # Data
-    # --------------------------------------------------------
-
-    for row_number, row in enumerate(
-        raw_data.itertuples(
-            index=False,
-            name=None
-        ),
-        start=2
+    for row_number in range(
+        len(history)
     ):
 
-        for column_number, value in enumerate(
-            row,
-            start=1
-        ):
+        row = history.iloc[
+            row_number
+        ]
 
-            cell = ws.cell(
-                row=row_number,
-                column=column_number,
-                value=value
-            )
+        ws.write(
+            row_number + 1,
+            0,
+            row["Date"].strftime(
+                "%Y-%m-%d"
+            ),
+            formats["raw_normal"]
+        )
 
-            cell.border = BORDER
+        ws.write(
+            row_number + 1,
+            1,
+            row["Cluster"],
+            formats["raw_normal"]
+        )
 
-    # --------------------------------------------------------
-    # Widths
-    # --------------------------------------------------------
+        ws.write(
+            row_number + 1,
+            2,
+            row["Region"],
+            formats["raw_normal"]
+        )
 
-    for column_number in range(
+        ws.write(
+            row_number + 1,
+            3,
+            row["Country"],
+            formats["raw_normal"]
+        )
+
+        ws.write(
+            row_number + 1,
+            4,
+            row["City"],
+            formats["raw_normal"]
+        )
+
+        ws.write(
+            row_number + 1,
+            5,
+            float(
+                row["Used Capacity (%)"]
+            ),
+            formats["raw_percent"]
+        )
+
+    ws.set_column(
+        "A:A",
+        14
+    )
+
+    ws.set_column(
+        "B:B",
+        16
+    )
+
+    ws.set_column(
+        "C:C",
+        12
+    )
+
+    ws.set_column(
+        "D:D",
+        16
+    )
+
+    ws.set_column(
+        "E:E",
+        20
+    )
+
+    ws.set_column(
+        "F:F",
+        20
+    )
+
+    ws.freeze_panes(
         1,
-        ws.max_column + 1
-    ):
-
-        column_letter = (
-            ws.cell(
-                row=1,
-                column=column_number
-            ).column_letter
-        )
-
-        ws.column_dimensions[
-            column_letter
-        ].width = 18
-
-    ws.freeze_panes = "A2"
-
-    return ws
+        0
+    )
 
 
 # ============================================================
@@ -830,7 +1277,7 @@ def generate_weekly_report():
 
     print()
     print("=" * 70)
-    print("Rubrik Weekly Capacity Report")
+    print("Rubrik Weekly Capacity Growth Report")
     print("=" * 70)
 
     # --------------------------------------------------------
@@ -840,46 +1287,62 @@ def generate_weekly_report():
     history = load_history()
 
     # --------------------------------------------------------
-    # Calculate weekly buckets
+    # Build weekly data
     # --------------------------------------------------------
 
-    data, selected_weeks = (
-        get_weekly_snapshots(
-            history
-        )
+    weekly, selected_weeks = build_weekly_data(
+        history
     )
 
-    print()
-
-    print(
-        "Weeks included : "
-        + str(
-            len(selected_weeks)
-        )
-    )
-
-    for week in selected_weeks:
-
-        print(
-            "  "
-            + week.strftime(
-                "%d %b %Y"
-            )
-        )
-
-    # --------------------------------------------------------
-    # Build weekly table
-    # --------------------------------------------------------
-
-    weekly_table = build_weekly_table(
-        data,
-        selected_weeks
-    )
-
-    if weekly_table.empty:
+    if weekly.empty:
 
         raise ValueError(
             "No weekly capacity data available."
+        )
+
+    # --------------------------------------------------------
+    # Week labels
+    # --------------------------------------------------------
+
+    week_labels = []
+
+    for week in selected_weeks:
+
+        week_data = weekly[
+            weekly["Week_Start"].eq(
+                week
+            )
+        ]
+
+        if week_data.empty:
+            continue
+
+        # Use latest actual snapshot date
+        latest_date = week_data[
+            "Report Date"
+        ].max()
+
+        label = format_excel_date(
+            latest_date
+        )
+
+        if label not in week_labels:
+
+            week_labels.append(
+                label
+            )
+
+    print()
+    print(
+        "Weeks included : "
+        + str(len(week_labels))
+    )
+
+    for week in week_labels:
+
+        print(
+            "  "
+            + week
         )
 
     print()
@@ -887,34 +1350,14 @@ def generate_weekly_report():
     print(
         "Clusters included : "
         + str(
-            len(weekly_table)
+            history["Cluster"].nunique()
         )
     )
-
-    # --------------------------------------------------------
-    # Determine week columns
-    # --------------------------------------------------------
-
-    week_columns = []
-
-    for week in selected_weeks:
-
-        formatted_name = (
-            week.strftime(
-                "%d-%b-%y"
-            )
-        )
-
-        if formatted_name in weekly_table.columns:
-
-            week_columns.append(
-                formatted_name
-            )
 
     print(
         "Weekly columns     : "
         + ", ".join(
-            week_columns
+            week_labels
         )
     )
 
@@ -928,7 +1371,7 @@ def generate_weekly_report():
     )
 
     # --------------------------------------------------------
-    # Report filename
+    # Filename
     # --------------------------------------------------------
 
     today = datetime.now()
@@ -946,105 +1389,48 @@ def generate_weekly_report():
     # Create workbook
     # --------------------------------------------------------
 
-    wb = Workbook()
+    workbook = xlsxwriter.Workbook(
+        report_path
+    )
 
-    default_sheet = wb.active
-
-    wb.remove(
-        default_sheet
+    formats = create_formats(
+        workbook
     )
 
     # --------------------------------------------------------
-    # Regional sheets
+    # Create regional sheets
     # --------------------------------------------------------
 
-    regions = [
-        "NA",
-        "NA_DD",
-        "LATAM",
-        "EU",
-        "APAC",
-        "CHINA"
-    ]
+    for region in REGIONS:
 
-    table_number = 1
-
-    for region in regions:
-
-        if region == "CHINA":
-
-            region_data = weekly_table[
-                weekly_table[
-                    "Country"
-                ]
-                .astype(str)
-                .str.upper()
-                .eq("CHINA")
-            ]
-
-        elif region == "NA_DD":
-
-            region_data = weekly_table.iloc[
-                0:0
-            ]
-
-        else:
-
-            region_data = weekly_table[
-                weekly_table[
-                    "Region"
-                ]
-                .astype(str)
-                .str.upper()
-                .eq(region)
-            ]
-
-        create_region_sheet(
-            wb,
-            region_data,
-            region,
-            week_columns,
-            table_number
+        region_table = build_region_table(
+            weekly,
+            region
         )
 
-        table_number += 1
+        create_region_sheet(
+            workbook,
+            formats,
+            region,
+            region_table,
+            week_labels
+        )
 
     # --------------------------------------------------------
     # Raw Data
     # --------------------------------------------------------
 
     create_raw_data_sheet(
-        wb,
-        data
+        workbook,
+        formats,
+        history
     )
 
     # --------------------------------------------------------
-    # Final sheet order
+    # Close workbook
     # --------------------------------------------------------
 
-    desired_order = [
-        "NA",
-        "NA_DD",
-        "LATAM",
-        "EU",
-        "APAC",
-        "CHINA",
-        "Raw Data"
-    ]
-
-    wb._sheets = [
-        wb[name]
-        for name in desired_order
-        if name in wb.sheetnames
-    ]
-
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
-
-    wb.save(
-        report_path
-    )
+    workbook.close()
 
     # --------------------------------------------------------
     # Verify
@@ -1074,21 +1460,14 @@ def generate_weekly_report():
     print(
         "Clusters        : "
         + str(
-            len(weekly_table)
+            history["Cluster"].nunique()
         )
     )
 
     print(
         "Weeks Included  : "
         + str(
-            len(selected_weeks)
-        )
-    )
-
-    print(
-        "Weekly Columns  : "
-        + str(
-            len(week_columns)
+            len(week_labels)
         )
     )
 
@@ -1102,7 +1481,8 @@ def generate_weekly_report():
     print(
         "Sheets          : "
         + ", ".join(
-            wb.sheetnames
+            REGIONS
+            + ["Raw Data"]
         )
     )
 
@@ -1117,12 +1497,9 @@ def generate_weekly_report():
 
 if __name__ == "__main__":
 
-    report_file = (
-        generate_weekly_report()
-    )
+    report_file = generate_weekly_report()
 
     print()
-
     print(
         "Sending Weekly Capacity Report Email..."
     )
