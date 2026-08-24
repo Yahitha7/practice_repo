@@ -1,7 +1,0 @@
-version
-cluster show
-system health status show
-system node show
-network interface show
-storage aggregate show
-volume show
