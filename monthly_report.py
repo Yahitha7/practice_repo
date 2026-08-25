@@ -11,7 +11,14 @@ from openpyxl.styles import (
     Side,
     Alignment
 )
-from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import (
+    BarChart,
+    LineChart,
+    Reference
+)
+from openpyxl.chart.label import DataLabelList
+
 
 # ============================================================
 # PATH CONFIGURATION
@@ -36,15 +43,18 @@ OUTPUT_DIR = os.path.join(
     "output"
 )
 
+
 # ============================================================
 # MONTHLY CONFIGURATION
 # ============================================================
 
 NUMBER_OF_MONTHS = 3
 
+# Backup team thresholds
 TH_LOW = 0.80
 TH_MEDIUM = 0.90
 TH_HIGH = 0.95
+
 
 # ============================================================
 # EXCEL STYLES
@@ -52,12 +62,12 @@ TH_HIGH = 0.95
 
 HEADER_FILL = PatternFill(
     fill_type="solid",
-    fgColor="1F4E78"
+    fgColor="D9EAF7"
 )
 
 HEADER_FONT = Font(
-    color="FFFFFF",
-    bold=True
+    bold=True,
+    color="000000"
 )
 
 TITLE_FONT = Font(
@@ -76,6 +86,12 @@ BORDER = Border(
     top=THIN_SIDE,
     bottom=THIN_SIDE
 )
+
+CENTER = Alignment(
+    horizontal="center",
+    vertical="center"
+)
+
 
 # ============================================================
 # LOAD HISTORY
@@ -96,9 +112,6 @@ def load_history():
         + DAILY_HISTORY_FILE
     )
 
-    # IMPORTANT:
-    # keep_default_na=False prevents Pandas from converting
-    # the valid region name "NA" into NaN.
     df = pd.read_csv(
         DAILY_HISTORY_FILE,
         keep_default_na=False
@@ -193,7 +206,7 @@ def load_history():
         )
 
     # --------------------------------------------------------
-    # Restore Region from cluster mapping if required
+    # Restore Region from cluster mapping
     # --------------------------------------------------------
 
     try:
@@ -279,13 +292,17 @@ def load_history():
     # Sort
     # --------------------------------------------------------
 
-    df = df.sort_values(
-        by=[
-            "Date",
-            "Cluster"
-        ]
-    ).reset_index(
-        drop=True
+    df = (
+        df
+        .sort_values(
+            by=[
+                "Date",
+                "Cluster"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     print(
@@ -315,16 +332,15 @@ def get_latest_months(df):
     if df.empty:
         return []
 
-    # Convert each date into calendar month.
-    df = df.copy()
+    data = df.copy()
 
-    df["Month_Period"] = (
-        df["Date"]
+    data["Month_Period"] = (
+        data["Date"]
         .dt.to_period("M")
     )
 
     available_months = sorted(
-        df["Month_Period"].unique()
+        data["Month_Period"].unique()
     )
 
     selected_months = (
@@ -360,10 +376,8 @@ def build_monthly_table(
         if month_data.empty:
             continue
 
-        # ----------------------------------------------------
-        # Take the latest snapshot available in that month
+        # Latest available snapshot in the month
         # for every cluster.
-        # ----------------------------------------------------
 
         month_data = (
             month_data
@@ -402,7 +416,7 @@ def build_monthly_table(
     )
 
     # --------------------------------------------------------
-    # Pivot months into columns
+    # Pivot months
     # --------------------------------------------------------
 
     pivot = monthly_data.pivot_table(
@@ -420,9 +434,7 @@ def build_monthly_table(
     pivot.columns.name = None
 
     # --------------------------------------------------------
-    # Rename month columns
-    # Example:
-    # 2026-08 -> Aug-26
+    # Rename months
     # --------------------------------------------------------
 
     rename_map = {}
@@ -444,7 +456,7 @@ def build_monthly_table(
     )
 
     # --------------------------------------------------------
-    # Month column names
+    # Month columns
     # --------------------------------------------------------
 
     month_columns = []
@@ -483,16 +495,20 @@ def build_monthly_table(
     ]
 
     # --------------------------------------------------------
-    # Sort by city
+    # Sort
     # --------------------------------------------------------
 
-    pivot = pivot.sort_values(
-        by=[
-            "City",
-            "Cluster"
-        ]
-    ).reset_index(
-        drop=True
+    pivot = (
+        pivot
+        .sort_values(
+            by=[
+                "City",
+                "Cluster"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return pivot
@@ -524,10 +540,14 @@ def create_region_sheet(
     ws["A1"].font = TITLE_FONT
 
     # --------------------------------------------------------
-    # Header
+    # No Filters
     # --------------------------------------------------------
 
-    start_row = 3
+    # --------------------------------------------------------
+    # Main table
+    # --------------------------------------------------------
+
+    start_row = 5
 
     headers = [
         "City Location",
@@ -554,83 +574,114 @@ def create_region_sheet(
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.border = BORDER
+        cell.alignment = CENTER
 
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center"
+    # --------------------------------------------------------
+    # Right-side chart source table
+    # --------------------------------------------------------
+
+    right_start_col = 10
+
+    for column_offset, header in enumerate(
+        headers,
+        start=right_start_col
+    ):
+
+        cell = ws.cell(
+            row=start_row,
+            column=column_offset,
+            value=header
         )
 
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.border = BORDER
+        cell.alignment = CENTER
+
     # --------------------------------------------------------
-    # Data
+    # Write regional data
     # --------------------------------------------------------
 
-    for row_offset, row_data in enumerate(
-        region_data.itertuples(
-            index=False,
-            name=None
-        ),
+    table_data = region_data.copy()
+
+    if not table_data.empty:
+
+        table_data["City Location"] = (
+            table_data["City"]
+            .astype(str)
+            .str.strip()
+        )
+
+        table_data = table_data[
+            table_data["City Location"] != ""
+        ]
+
+        table_data = table_data.sort_values(
+            by=[
+                "City Location",
+                "Cluster"
+            ]
+        )
+
+    for row_offset, (_, record) in enumerate(
+        table_data.iterrows(),
         start=1
     ):
 
-        row_number = (
+        excel_row = (
             start_row
             + row_offset
         )
 
-        # Tuple structure:
-        #
-        # 0 Cluster
-        # 1 Region
-        # 2 Country
-        # 3 City
-        # 4+ monthly values
-
-        city = row_data[3]
-
         values = [
-            city,
+            record["City Location"],
             TH_LOW,
             TH_MEDIUM,
             TH_HIGH
         ]
 
-        for index in range(
-            4,
-            len(row_data)
-        ):
+        for month in month_columns:
 
             values.append(
-                row_data[index]
+                record.get(
+                    month,
+                    None
+                )
             )
 
+        # Main table
         for column_number, value in enumerate(
             values,
             start=1
         ):
 
             cell = ws.cell(
-                row=row_number,
+                row=excel_row,
                 column=column_number,
                 value=value
             )
 
             cell.border = BORDER
 
-            cell.alignment = Alignment(
-                vertical="center"
-            )
-
-            # Threshold percentages
-            if column_number in [
-                2,
-                3,
-                4
-            ]:
+            if column_number >= 2:
 
                 cell.number_format = "0%"
 
-            # Monthly capacity percentages
-            elif column_number >= 5:
+        # Chart source table
+        for offset, value in enumerate(
+            values,
+            start=right_start_col
+        ):
+
+            cell = ws.cell(
+                row=excel_row,
+                column=offset,
+                value=value
+            )
+
+            cell.border = BORDER
+
+            if offset >= right_start_col + 1:
 
                 cell.number_format = "0%"
 
@@ -638,24 +689,193 @@ def create_region_sheet(
     # Column widths
     # --------------------------------------------------------
 
-    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["A"].width = 22
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 14
 
     for column_number in range(
-        5,
-        ws.max_column + 1
+        4,
+        4 + len(month_columns)
     ):
 
         ws.column_dimensions[
-            ws.cell(
-                row=1,
-                column=column_number
-            ).column_letter
+            get_column_letter(column_number)
         ].width = 14
 
-    ws.freeze_panes = "A4"
+    ws.column_dimensions["J"].width = 22
+
+    for column_number in range(
+        right_start_col + 1,
+        right_start_col + 4 + len(month_columns)
+    ):
+
+        ws.column_dimensions[
+            get_column_letter(column_number)
+        ].width = 14
+
+    # --------------------------------------------------------
+    # Chart
+    # --------------------------------------------------------
+
+    if not table_data.empty:
+
+        first_data_row = start_row + 1
+
+        last_data_row = (
+            start_row
+            + len(table_data)
+        )
+
+        # ----------------------------------------------------
+        # Bar chart
+        # ----------------------------------------------------
+
+        bar_chart = BarChart()
+
+        bar_chart.type = "col"
+
+        bar_chart.title = ""
+
+        bar_chart.y_axis.numFmt = "0%"
+
+        bar_chart.y_axis.scaling.min = 0
+        bar_chart.y_axis.scaling.max = 1
+        bar_chart.y_axis.majorUnit = 0.25
+
+        bar_chart.x_axis.title = ""
+
+        categories = Reference(
+            ws,
+            min_col=right_start_col,
+            min_row=first_data_row,
+            max_row=last_data_row
+        )
+
+        # ----------------------------------------------------
+        # Add one bar series for every month
+        # ----------------------------------------------------
+
+        for index, month in enumerate(
+            month_columns
+        ):
+
+            month_column = (
+                right_start_col
+                + 4
+                + index
+            )
+
+            values = Reference(
+                ws,
+                min_col=month_column,
+                min_row=start_row,
+                max_row=last_data_row
+            )
+
+            bar_chart.add_data(
+                values,
+                titles_from_data=True
+            )
+
+        bar_chart.set_categories(
+            categories
+        )
+
+        bar_chart.dLbls = DataLabelList()
+
+        bar_chart.dLbls.showVal = True
+
+        bar_chart.dLbls.numFmt = "0%"
+
+        bar_chart.dLbls.position = "outEnd"
+
+        # ----------------------------------------------------
+        # Threshold lines
+        # ----------------------------------------------------
+
+        low_line = LineChart()
+
+        low_values = Reference(
+            ws,
+            min_col=right_start_col + 1,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        low_line.add_data(
+            low_values,
+            titles_from_data=True
+        )
+
+        low_line.set_categories(
+            categories
+        )
+
+        medium_line = LineChart()
+
+        medium_values = Reference(
+            ws,
+            min_col=right_start_col + 2,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        medium_line.add_data(
+            medium_values,
+            titles_from_data=True
+        )
+
+        medium_line.set_categories(
+            categories
+        )
+
+        high_line = LineChart()
+
+        high_values = Reference(
+            ws,
+            min_col=right_start_col + 3,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        high_line.add_data(
+            high_values,
+            titles_from_data=True
+        )
+
+        high_line.set_categories(
+            categories
+        )
+
+        # ----------------------------------------------------
+        # Combine
+        # ----------------------------------------------------
+
+        bar_chart += low_line
+        bar_chart += medium_line
+        bar_chart += high_line
+
+        bar_chart.height = 10
+        bar_chart.width = 18
+
+        bar_chart.legend.position = "t"
+
+        # ----------------------------------------------------
+        # Insert chart below table
+        # ----------------------------------------------------
+
+        chart_row = (
+            start_row
+            + len(table_data)
+            + 3
+        )
+
+        ws.add_chart(
+            bar_chart,
+            f"E{chart_row}"
+        )
+
+    ws.freeze_panes = "A6"
 
     return ws
 
@@ -680,12 +900,16 @@ def create_raw_data_sheet(
     ws["A1"].font = TITLE_FONT
 
     # --------------------------------------------------------
-    # Raw columns
+    # Raw data columns
     # --------------------------------------------------------
 
     columns = [
         "Date",
+        "Month",
         "Cluster",
+        "Active",
+        "Location",
+        "Type",
         "Region",
         "Country",
         "City",
@@ -694,9 +918,9 @@ def create_raw_data_sheet(
         "Free Capacity (GB)",
         "Used Capacity (%)",
         "Free Capacity (%)",
-        "Active",
-        "Location",
-        "Type"
+        "TH High",
+        "TH Medium",
+        "TH Low"
     ]
 
     start_row = 3
@@ -715,22 +939,23 @@ def create_raw_data_sheet(
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.border = BORDER
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
-        )
+        cell.alignment = CENTER
 
     # --------------------------------------------------------
-    # Raw data rows
+    # Write history
     # --------------------------------------------------------
 
-    for row_offset, row_data in enumerate(
-        history.itertuples(
-            index=False,
-            name=None
-        ),
+    sorted_history = history.sort_values(
+        by=[
+            "Date",
+            "Cluster"
+        ]
+    ).reset_index(
+        drop=True
+    )
+
+    for row_offset, (_, record) in enumerate(
+        sorted_history.iterrows(),
         start=1
     ):
 
@@ -739,13 +964,13 @@ def create_raw_data_sheet(
             + row_offset
         )
 
-        record = history.iloc[
-            row_offset - 1
-        ]
-
         values = [
             record["Date"],
+            record["Date"].strftime("%Y-%m"),
             record["Cluster"],
+            record["Active"],
+            record["Location"],
+            record["Type"],
             record["Region"],
             record["Country"],
             record["City"],
@@ -754,24 +979,15 @@ def create_raw_data_sheet(
             record["Free Capacity (GB)"],
             record["Used Capacity (%)"],
             record["Free Capacity (%)"],
-            record["Active"],
-            record["Location"],
-            record["Type"]
+            TH_HIGH,
+            TH_MEDIUM,
+            TH_LOW
         ]
 
         for column_number, value in enumerate(
             values,
             start=1
         ):
-
-            # Excel does not accept pandas Period
-            # or some pandas-specific objects.
-            if isinstance(
-                value,
-                pd.Period
-            ):
-
-                value = str(value)
 
             cell = ws.cell(
                 row=row_number,
@@ -781,24 +997,27 @@ def create_raw_data_sheet(
 
             cell.border = BORDER
 
-            cell.alignment = Alignment(
-                vertical="center"
-            )
+            if column_number == 1:
 
-            if column_number in [
-                9,
-                10
-            ]:
-
-                cell.number_format = "0.00%"
+                cell.number_format = "yyyy-mm-dd"
 
             elif column_number in [
-                6,
-                7,
-                8
+                10,
+                11,
+                12
             ]:
 
                 cell.number_format = "#,##0.00"
+
+            elif column_number in [
+                13,
+                14,
+                15,
+                16,
+                17
+            ]:
+
+                cell.number_format = "0%"
 
     # --------------------------------------------------------
     # Widths
@@ -806,18 +1025,22 @@ def create_raw_data_sheet(
 
     widths = {
         "A": 14,
-        "B": 16,
-        "C": 12,
-        "D": 18,
-        "E": 20,
-        "F": 20,
-        "G": 20,
-        "H": 20,
-        "I": 18,
-        "J": 18,
-        "K": 12,
-        "L": 35,
-        "M": 15
+        "B": 12,
+        "C": 16,
+        "D": 12,
+        "E": 40,
+        "F": 16,
+        "G": 12,
+        "H": 18,
+        "I": 20,
+        "J": 20,
+        "K": 20,
+        "L": 20,
+        "M": 18,
+        "N": 18,
+        "O": 12,
+        "P": 12,
+        "Q": 12
     }
 
     for column, width in widths.items():
@@ -857,8 +1080,9 @@ def generate_monthly_report():
     )
 
     print()
+
     print(
-        "Months available : "
+        "Months included : "
         + str(len(selected_months))
     )
 
@@ -917,7 +1141,9 @@ def generate_monthly_report():
 
     print(
         "Monthly columns    : "
-        + ", ".join(month_columns)
+        + ", ".join(
+            month_columns
+        )
     )
 
     # --------------------------------------------------------
@@ -930,7 +1156,7 @@ def generate_monthly_report():
     )
 
     # --------------------------------------------------------
-    # Report filename
+    # File name
     # --------------------------------------------------------
 
     today = datetime.now()
@@ -945,7 +1171,7 @@ def generate_monthly_report():
     )
 
     # --------------------------------------------------------
-    # Create workbook
+    # Workbook
     # --------------------------------------------------------
 
     wb = Workbook()
@@ -978,15 +1204,13 @@ def generate_monthly_report():
                 .astype(str)
                 .str.upper()
                 .eq("CHINA")
-            ]
+            ].copy()
 
         elif region == "NA_DD":
 
-            # Required sheet but currently no
-            # clusters are assigned to NA_DD.
             region_data = monthly_table.iloc[
                 0:0
-            ]
+            ].copy()
 
         else:
 
@@ -995,7 +1219,12 @@ def generate_monthly_report():
                 .astype(str)
                 .str.upper()
                 .eq(region)
-            ]
+            ].copy()
+
+        print(
+            f"{region:<8}: "
+            f"{len(region_data)} clusters"
+        )
 
         create_region_sheet(
             wb,
@@ -1040,10 +1269,6 @@ def generate_monthly_report():
     wb.save(
         report_path
     )
-
-    # --------------------------------------------------------
-    # Verify
-    # --------------------------------------------------------
 
     file_exists = os.path.exists(
         report_path
@@ -1104,6 +1329,7 @@ if __name__ == "__main__":
     )
 
     print()
+
     print(
         "Sending Monthly Capacity Report Email..."
     )
