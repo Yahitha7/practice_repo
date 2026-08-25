@@ -21,11 +21,7 @@ from openpyxl.chart import (
     LineChart,
     Reference
 )
-
-from growth import (
-    build_forecast_table,
-    flag_threshold_status
-)
+from openpyxl.chart.label import DataLabelList
 
 
 # ============================================================
@@ -41,9 +37,10 @@ OUTPUT_DIR = os.path.join(
     "output"
 )
 
-DAILY_LOW = 0.80
-DAILY_MEDIUM = 0.90
-DAILY_HIGH = 0.95
+# Backup team's thresholds
+TH_LOW = 0.80
+TH_MEDIUM = 0.90
+TH_HIGH = 0.95
 
 
 # ============================================================
@@ -52,21 +49,15 @@ DAILY_HIGH = 0.95
 
 HEADER_FILL = PatternFill(
     fill_type="solid",
-    fgColor="1F4E78"
+    fgColor="D9EAF7"
 )
 
 HEADER_FONT = Font(
-    color="FFFFFF",
-    bold=True
-)
-
-TITLE_FILL = PatternFill(
-    fill_type="solid",
-    fgColor="17365D"
+    bold=True,
+    color="000000"
 )
 
 TITLE_FONT = Font(
-    color="FFFFFF",
     bold=True,
     size=14
 )
@@ -83,49 +74,22 @@ BORDER = Border(
     bottom=THIN_SIDE
 )
 
-
-# ============================================================
-# REPORT COLUMNS
-# ============================================================
-
-REPORT_COLUMNS = [
-    "Month",
-    "Active",
-    "Location",
-    "Type",
-    "Target Storage",
-    "Region",
-    "Country",
-    "City",
-    "Total Capacity (GB)",
-    "Used Capacity (GB)",
-    "Free Capacity (GB)",
-    "Used Capacity (%)",
-    "Free Capacity (%)",
-    "TH %-80",
-    "TH %-90",
-    "TH %-95",
-    "Threshold Status",
-    "Daily Growth (GB)",
-    "Average Daily Consumption (GB)",
-    "Estimated Days Until Exhaustion",
-    "Estimated Exhaustion Date"
-]
+CENTER = Alignment(
+    horizontal="center",
+    vertical="center"
+)
 
 
 # ============================================================
-# PREPARE DATAFRAME
+# PREPARE DATA
 # ============================================================
 
-def prepare_dataframe(
-    df,
-    forecast_df=None
-):
+def prepare_dataframe(df):
 
     data = df.copy()
 
     # --------------------------------------------------------
-    # Normalize capacity column names
+    # Normalize column names
     # --------------------------------------------------------
 
     rename_map = {
@@ -149,419 +113,530 @@ def prepare_dataframe(
         columns=rename_map
     )
 
+
     # --------------------------------------------------------
-    # Month
+    # Ensure Cluster column is populated
     # --------------------------------------------------------
 
-    if "Month" not in data.columns:
+    if "Cluster" not in data.columns:
+        data["Cluster"] = ""
 
-        data["Month"] = (
-            datetime.now().strftime(
-                "%Y-%m-%d"
-            )
+    if "Target Storage" in data.columns:
+        data["Cluster"] = data["Cluster"].where(
+            data["Cluster"].astype(str).str.strip() != "",
+            data["Target Storage"]
         )
 
-    # --------------------------------------------------------
-    # Thresholds
-    # --------------------------------------------------------
-
-    data["TH %-80"] = DAILY_LOW
-    data["TH %-90"] = DAILY_MEDIUM
-    data["TH %-95"] = DAILY_HIGH
 
     # --------------------------------------------------------
-    # Default growth fields
+    # Actual report date
     # --------------------------------------------------------
 
-    data["Threshold Status"] = "Unknown"
+    report_date = datetime.now().strftime(
+        "%Y-%m-%d"
+    )
 
-    data["Daily Growth (GB)"] = None
+    data["Date"] = report_date
 
-    data[
-        "Average Daily Consumption (GB)"
-    ] = None
+    # Keep Month for Raw Data because backup
+    # team's source data contains it.
 
-    data[
-        "Estimated Days Until Exhaustion"
-    ] = None
-
-    data[
-        "Estimated Exhaustion Date"
-    ] = "Insufficient History"
+    data["Month"] = datetime.now().strftime(
+        "%Y-%m"
+    )
 
     # --------------------------------------------------------
-    # Merge forecast information
-    #
-    # history uses Cluster
-    # current data uses Target Storage
+    # Backup team thresholds
     # --------------------------------------------------------
 
-    if (
-        forecast_df is not None
-        and not forecast_df.empty
-        and "Cluster" in forecast_df.columns
-        and "Target Storage" in data.columns
-    ):
-
-        forecast_columns = [
-            "Cluster",
-            "Daily Growth (GB)",
-            "Average Daily Consumption (GB)",
-            "Estimated Days Until Exhaustion",
-            "Estimated Exhaustion Date"
-        ]
-
-        available_columns = [
-            column
-            for column in forecast_columns
-            if column in forecast_df.columns
-        ]
-
-        forecast_merge = forecast_df[
-            available_columns
-        ].copy()
-
-        forecast_merge = forecast_merge.rename(
-            columns={
-                "Cluster":
-                    "Target Storage"
-            }
-        )
-
-        data = data.merge(
-            forecast_merge,
-            on="Target Storage",
-            how="left",
-            suffixes=(
-                "",
-                "_forecast"
-            )
-        )
-
-        for column in [
-            "Daily Growth (GB)",
-            "Average Daily Consumption (GB)",
-            "Estimated Days Until Exhaustion",
-            "Estimated Exhaustion Date"
-        ]:
-
-            forecast_column = (
-                f"{column}_forecast"
-            )
-
-            if forecast_column in data.columns:
-
-                data[column] = (
-                    data[forecast_column]
-                    .combine_first(
-                        data[column]
-                    )
-                )
-
-                data.drop(
-                    columns=[
-                        forecast_column
-                    ],
-                    inplace=True
-                )
+    data["TH High"] = TH_HIGH
+    data["TH Medium"] = TH_MEDIUM
+    data["TH Low"] = TH_LOW
 
     # --------------------------------------------------------
-    # Threshold status
+    # Make sure required columns exist
     # --------------------------------------------------------
 
-    if "Used Capacity (%)" in data.columns:
+    required_columns = [
+        "Date",
+        "Month",
+        "Active",
+        "Location",
+        "Type",
+        "Cluster",
+        "Region",
+        "Country",
+        "City",
+        "Total Capacity (GB)",
+        "Used Capacity (GB)",
+        "Free Capacity (GB)",
+        "Used Capacity (%)",
+        "Free Capacity (%)",
+        "TH High",
+        "TH Medium",
+        "TH Low"
+    ]
 
-        data["Threshold Status"] = (
-            data["Used Capacity (%)"]
-            .apply(
-                lambda value:
-                    flag_threshold_status(
-                        value,
-                        {
-                            "warning":
-                                DAILY_LOW,
-
-                            "critical":
-                                DAILY_MEDIUM,
-
-                            "immediate":
-                                DAILY_HIGH
-                        }
-                    )
-            )
-        )
-
-    # --------------------------------------------------------
-    # Ensure all columns exist
-    # --------------------------------------------------------
-
-    for column in REPORT_COLUMNS:
+    for column in required_columns:
 
         if column not in data.columns:
 
             data[column] = ""
 
-    # --------------------------------------------------------
-    # Keep required columns
-    # --------------------------------------------------------
-
-    data = data[
-        REPORT_COLUMNS
-    ]
-
     return data
 
 
 # ============================================================
-# FORMAT WORKSHEET
+# WRITE CELL
 # ============================================================
 
-def format_worksheet(
+def write_cell(
     ws,
-    df
+    row,
+    column,
+    value,
+    header=False,
+    percent=False
 ):
 
-    # --------------------------------------------------------
-    # Header
-    # --------------------------------------------------------
+    cell = ws.cell(
+        row=row,
+        column=column,
+        value=value
+    )
 
-    for column_number, header in enumerate(
-        df.columns,
-        start=1
-    ):
+    cell.border = BORDER
 
-        cell = ws.cell(
-            row=1,
-            column=column_number,
-            value=header
-        )
+    if header:
 
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
-        cell.border = BORDER
+        cell.alignment = CENTER
 
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
+    elif percent:
+
+        cell.number_format = "0%"
+
+    return cell
+
+
+# ============================================================
+# CREATE REGIONAL SHEET
+# ============================================================
+
+def create_region_sheet(
+    wb,
+    region_data,
+    region_name,
+    report_date
+):
+
+    ws = wb.create_sheet(
+        title=region_name
+    )
+
+    # --------------------------------------------------------
+    # If no data
+    # --------------------------------------------------------
+
+    if region_data.empty:
+
+        ws["A1"] = (
+            f"No data available for {region_name}"
         )
 
-    # --------------------------------------------------------
-    # Body
-    # --------------------------------------------------------
-
-    for row in ws.iter_rows(
-        min_row=2,
-        max_row=ws.max_row
-    ):
-
-        for cell in row:
-
-            cell.border = BORDER
-
-            cell.alignment = Alignment(
-                vertical="center"
-            )
+        return ws
 
     # --------------------------------------------------------
-    # Number formats
+    # Title
     # --------------------------------------------------------
+
+    ws["A1"] = (
+        "Rubrik Daily Capacity Growth"
+    )
+
+    ws["A1"].font = TITLE_FONT
+
+    # --------------------------------------------------------
+    # No Filters
+    # --------------------------------------------------------
+
+
+    # --------------------------------------------------------
+    # Main table
+    # --------------------------------------------------------
+
+    start_row = 5
+
+    headers = [
+        "City Location",
+        "TH %-80",
+        "TH %-90",
+        "TH %-95",
+        report_date
+    ]
 
     for column_number, header in enumerate(
-        df.columns,
+        headers,
         start=1
     ):
 
-        for row_number in range(
+        write_cell(
+            ws,
+            start_row,
+            column_number,
+            header,
+            header=True
+        )
+
+    # --------------------------------------------------------
+    # Prepare city data
+    # --------------------------------------------------------
+
+    table_data = region_data.copy()
+
+    table_data["City Location"] = (
+        table_data["City"]
+        .astype(str)
+        .str.strip()
+    )
+
+    table_data = table_data[
+        table_data["City Location"]
+        != ""
+    ]
+
+    table_data = table_data.sort_values(
+        by="City Location"
+    )
+
+    # --------------------------------------------------------
+    # Write regional rows
+    # --------------------------------------------------------
+
+    for row_offset, (_, row) in enumerate(
+        table_data.iterrows(),
+        start=1
+    ):
+
+        excel_row = (
+            start_row
+            + row_offset
+        )
+
+        city = row[
+            "City Location"
+        ]
+
+        used_percentage = row[
+            "Used Capacity (%)"
+        ]
+
+        write_cell(
+            ws,
+            excel_row,
+            1,
+            city
+        )
+
+        write_cell(
+            ws,
+            excel_row,
             2,
-            ws.max_row + 1
-        ):
+            TH_LOW,
+            percent=True
+        )
 
-            cell = ws.cell(
-                row=row_number,
-                column=column_number
-            )
+        write_cell(
+            ws,
+            excel_row,
+            3,
+            TH_MEDIUM,
+            percent=True
+        )
 
-            if (
-                "Capacity (%)" in header
-                or header.startswith("TH %-")
-            ):
+        write_cell(
+            ws,
+            excel_row,
+            4,
+            TH_HIGH,
+            percent=True
+        )
 
-                cell.number_format = "0.00%"
+        write_cell(
+            ws,
+            excel_row,
+            5,
+            used_percentage,
+            percent=True
+        )
 
-            elif (
-                "Capacity (GB)" in header
-                or "Growth (GB)" in header
-                or "Consumption (GB)" in header
-            ):
+    # --------------------------------------------------------
+    # Right-side duplicate table
+    #
+    # Backup team's report has the same data table
+    # on the right side for chart source.
+    # --------------------------------------------------------
 
-                cell.number_format = "#,##0.00"
+    right_start_col = 10
 
-            elif (
-                "Days Until Exhaustion"
-                in header
-            ):
+    for column_offset, header in enumerate(
+        headers,
+        start=right_start_col
+    ):
 
-                cell.number_format = "0.0"
+        write_cell(
+            ws,
+            start_row,
+            column_offset,
+            header,
+            header=True
+        )
+
+    for row_offset, (_, row) in enumerate(
+        table_data.iterrows(),
+        start=1
+    ):
+
+        excel_row = (
+            start_row
+            + row_offset
+        )
+
+        city = row[
+            "City Location"
+        ]
+
+        used_percentage = row[
+            "Used Capacity (%)"
+        ]
+
+        write_cell(
+            ws,
+            excel_row,
+            right_start_col,
+            city
+        )
+
+        write_cell(
+            ws,
+            excel_row,
+            right_start_col + 1,
+            TH_LOW,
+            percent=True
+        )
+
+        write_cell(
+            ws,
+            excel_row,
+            right_start_col + 2,
+            TH_MEDIUM,
+            percent=True
+        )
+
+        write_cell(
+            ws,
+            excel_row,
+            right_start_col + 3,
+            TH_HIGH,
+            percent=True
+        )
+
+        write_cell(
+            ws,
+            excel_row,
+            right_start_col + 4,
+            used_percentage,
+            percent=True
+        )
 
     # --------------------------------------------------------
     # Column widths
     # --------------------------------------------------------
 
-    for column_number, column_name in enumerate(
-        df.columns,
-        start=1
-    ):
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 14
 
-        max_length = len(
-            str(column_name)
-        )
-
-        for row_number in range(
-            2,
-            ws.max_row + 1
-        ):
-
-            value = ws.cell(
-                row=row_number,
-                column=column_number
-            ).value
-
-            if value is not None:
-
-                max_length = max(
-                    max_length,
-                    len(str(value))
-                )
-
-        ws.column_dimensions[
-            get_column_letter(
-                column_number
-            )
-        ].width = min(
-            max(max_length + 2, 12),
-            40
-        )
-
-    ws.freeze_panes = "A2"
-
-
-# ============================================================
-# ADD TABLE
-# ============================================================
-
-def add_table(
-    ws,
-    table_name
-):
-
-    if ws.max_row < 2:
-        return
-
-    table = Table(
-        displayName=table_name,
-        ref=ws.dimensions
-    )
-
-    style = TableStyleInfo(
-        name="TableStyleMedium2",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False
-    )
-
-    table.tableStyleInfo = style
-
-    ws.add_table(
-        table
-    )
-
-
-# ============================================================
-# CREATE REGION SHEET
-# ============================================================
-
-def create_region_sheet(
-    wb,
-    df,
-    sheet_name
-):
-
-    ws = wb.create_sheet(
-        sheet_name
-    )
-
-    if df.empty:
-
-        ws["A1"] = (
-            f"No capacity data available for "
-            f"{sheet_name}"
-        )
-
-        ws["A1"].font = Font(
-            bold=True
-        )
-
-        ws.column_dimensions[
-            "A"
-        ].width = 50
-
-        return ws
+    ws.column_dimensions["J"].width = 22
+    ws.column_dimensions["K"].width = 14
+    ws.column_dimensions["L"].width = 14
+    ws.column_dimensions["M"].width = 14
+    ws.column_dimensions["N"].width = 14
 
     # --------------------------------------------------------
-    # Write headers
+    # Create chart
     # --------------------------------------------------------
 
-    for column_number, header in enumerate(
-        df.columns,
-        start=1
-    ):
+    if not table_data.empty:
 
-        ws.cell(
-            row=1,
-            column=column_number,
-            value=header
+        first_data_row = start_row + 1
+
+        last_data_row = (
+            start_row
+            + len(table_data)
         )
 
-    # --------------------------------------------------------
-    # Write data
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Bar chart
+        # ----------------------------------------------------
 
-    for row_number, row_data in enumerate(
-        df.itertuples(
-            index=False,
-            name=None
-        ),
-        start=2
-    ):
+        bar_chart = BarChart()
 
-        for column_number, value in enumerate(
-            row_data,
-            start=1
-        ):
+        bar_chart.type = "col"
 
-            ws.cell(
-                row=row_number,
-                column=column_number,
-                value=value
-            )
+        bar_chart.style = 10
 
-    format_worksheet(
-        ws,
-        df
-    )
+        bar_chart.title = ""
 
-    safe_name = (
-        sheet_name
-        .replace(" ", "")
-        .replace("-", "")
-    )
+        bar_chart.y_axis.title = ""
 
-    add_table(
-        ws,
-        f"Tbl{safe_name}"
-    )
+        bar_chart.x_axis.title = ""
+
+        bar_chart.y_axis.numFmt = "0%"
+
+        bar_chart.y_axis.scaling.min = 0
+        bar_chart.y_axis.scaling.max = 1
+        bar_chart.y_axis.majorUnit = 0.25
+
+        # Current date values
+
+        current_values = Reference(
+            ws,
+            min_col=right_start_col + 4,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        categories = Reference(
+            ws,
+            min_col=right_start_col,
+            min_row=first_data_row,
+            max_row=last_data_row
+        )
+
+        bar_chart.add_data(
+            current_values,
+            titles_from_data=True
+        )
+
+        bar_chart.set_categories(
+            categories
+        )
+
+        # Data labels
+
+        if bar_chart.series:
+
+            bar_chart.series[0].graphicalProperties.noFill = False
+
+            bar_chart.series[0].dLbls = DataLabelList()
+
+            bar_chart.series[0].dLbls.showVal = True
+            bar_chart.series[0].dLbls.numFmt = "0%"
+            bar_chart.series[0].dLbls.position = "outEnd"
+
+        # ----------------------------------------------------
+        # Low threshold line
+        # ----------------------------------------------------
+
+        low_line = LineChart()
+
+        low_values = Reference(
+            ws,
+            min_col=right_start_col + 1,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        low_line.add_data(
+            low_values,
+            titles_from_data=True
+        )
+
+        low_line.set_categories(
+            categories
+        )
+
+        # ----------------------------------------------------
+        # Medium threshold line
+        # ----------------------------------------------------
+
+        medium_line = LineChart()
+
+        medium_values = Reference(
+            ws,
+            min_col=right_start_col + 2,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        medium_line.add_data(
+            medium_values,
+            titles_from_data=True
+        )
+
+        medium_line.set_categories(
+            categories
+        )
+
+        # ----------------------------------------------------
+        # High threshold line
+        # ----------------------------------------------------
+
+        high_line = LineChart()
+
+        high_values = Reference(
+            ws,
+            min_col=right_start_col + 3,
+            min_row=start_row,
+            max_row=last_data_row
+        )
+
+        high_line.add_data(
+            high_values,
+            titles_from_data=True
+        )
+
+        high_line.set_categories(
+            categories
+        )
+
+        # ----------------------------------------------------
+        # Combine charts
+        # ----------------------------------------------------
+
+        bar_chart += low_line
+        bar_chart += medium_line
+        bar_chart += high_line
+
+        bar_chart.height = 10
+        bar_chart.width = 18
+
+        # ----------------------------------------------------
+        # Legend
+        # ----------------------------------------------------
+
+        bar_chart.legend.position = "t"
+
+        # ----------------------------------------------------
+        # Insert chart
+        # ----------------------------------------------------
+
+        chart_row = (
+            start_row
+            + len(table_data)
+            + 3
+        )
+
+        ws.add_chart(
+            bar_chart,
+            f"E{chart_row}"
+        )
+
+    ws.freeze_panes = "A6"
 
     return ws
 
@@ -572,643 +647,90 @@ def create_region_sheet(
 
 def create_raw_data_sheet(
     wb,
-    df
+    data
 ):
 
     ws = wb.create_sheet(
         "Raw Data"
     )
 
-    if df.empty:
-
-        ws["A1"] = (
-            "No raw data available."
-        )
-
-        return ws
-
-    for column_number, header in enumerate(
-        df.columns,
-        start=1
-    ):
-
-        ws.cell(
-            row=1,
-            column=column_number,
-            value=header
-        )
-
-    for row_number, row_data in enumerate(
-        df.itertuples(
-            index=False,
-            name=None
-        ),
-        start=2
-    ):
-
-        for column_number, value in enumerate(
-            row_data,
-            start=1
-        ):
-
-            ws.cell(
-                row=row_number,
-                column=column_number,
-                value=value
-            )
-
-    format_worksheet(
-        ws,
-        df
-    )
-
-    add_table(
-        ws,
-        "TblRawData"
-    )
-
-    return ws
-
-
-# ============================================================
-# CREATE GLOBAL VIEW
-# ============================================================
-
-def create_global_view(
-    wb,
-    df,
-    history_df=None
-):
-
-    ws = wb.create_sheet(
-        "Global View"
-    )
-
     # --------------------------------------------------------
-    # Title
+    # Raw Data columns
+    #
+    # Keep Date explicitly.
     # --------------------------------------------------------
 
-    ws["A1"] = (
-        "Rubrik Daily Capacity Report"
-    )
-
-    ws["A1"].font = Font(
-        bold=True,
-        size=16
-    )
-
-    # --------------------------------------------------------
-    # Report date
-    # --------------------------------------------------------
-
-    ws["A3"] = "Report Date"
-
-    if not df.empty:
-
-        report_date = df.iloc[0][
-            "Month"
-        ]
-
-    else:
-
-        report_date = (
-            datetime.now().strftime(
-                "%Y-%m-%d"
-            )
-        )
-
-    ws["B3"] = report_date
-
-    # --------------------------------------------------------
-    # Cluster count
-    # --------------------------------------------------------
-
-    ws["A4"] = "Clusters Included"
-    ws["B4"] = len(df)
-
-    # --------------------------------------------------------
-    # Regional summary
-    # --------------------------------------------------------
-
-    if df.empty:
-
-        ws["A6"] = (
-            "No capacity data available."
-        )
-
-        return ws
-
-    summary = (
-        df.groupby("Region")
-        .agg(
-            Clusters=(
-                "Target Storage",
-                "count"
-            ),
-            Total_Capacity_GB=(
-                "Total Capacity (GB)",
-                "sum"
-            ),
-            Used_Capacity_GB=(
-                "Used Capacity (GB)",
-                "sum"
-            ),
-            Free_Capacity_GB=(
-                "Free Capacity (GB)",
-                "sum"
-            )
-        )
-        .reset_index()
-    )
-
-    # --------------------------------------------------------
-    # Regional percentages
-    # --------------------------------------------------------
-
-    summary[
-        "Used Capacity (%)"
-    ] = (
-        summary["Used_Capacity_GB"]
-        /
-        summary["Total_Capacity_GB"]
-    )
-
-    summary[
-        "Free Capacity (%)"
-    ] = (
-        summary["Free_Capacity_GB"]
-        /
-        summary["Total_Capacity_GB"]
-    )
+    raw_columns = [
+        "Date",
+        "Month",
+        "Active",
+        "Location",
+        "Type",
+        "Cluster",
+        "Region",
+        "Country",
+        "City",
+        "Total Capacity (GB)",
+        "Used Capacity (GB)",
+        "Free Capacity (GB)",
+        "Used Capacity (%)",
+        "Free Capacity (%)",
+        "TH High",
+        "TH Medium",
+        "TH Low"
+    ]
 
     # --------------------------------------------------------
     # Headers
     # --------------------------------------------------------
 
-    start_row = 7
-
-    headers = [
-        "Region",
-        "Clusters",
-        "Total Capacity (GB)",
-        "Used Capacity (GB)",
-        "Free Capacity (GB)",
-        "Used Capacity (%)",
-        "Free Capacity (%)"
-    ]
-
     for column_number, header in enumerate(
-        headers,
+        raw_columns,
         start=1
     ):
 
-        cell = ws.cell(
-            row=start_row,
-            column=column_number,
-            value=header
-        )
-
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.border = BORDER
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
+        write_cell(
+            ws,
+            1,
+            column_number,
+            header,
+            header=True
         )
 
     # --------------------------------------------------------
-    # Summary data
+    # Data
     # --------------------------------------------------------
 
-    for row_offset, row_data in enumerate(
-        summary.itertuples(
-            index=False,
-            name=None
-        ),
-        start=1
+    for row_number, (_, row) in enumerate(
+        data.iterrows(),
+        start=2
     ):
 
-        row_number = (
-            start_row
-            + row_offset
-        )
-
-        values = [
-            row_data[0],
-            row_data[1],
-            row_data[2],
-            row_data[3],
-            row_data[4],
-            row_data[5],
-            row_data[6]
-        ]
-
-        for column_number, value in enumerate(
-            values,
+        for column_number, column in enumerate(
+            raw_columns,
             start=1
         ):
 
-            cell = ws.cell(
-                row=row_number,
-                column=column_number,
-                value=value
+            value = row.get(
+                column,
+                ""
             )
 
-            cell.border = BORDER
-
-    # --------------------------------------------------------
-    # Number formats
-    # --------------------------------------------------------
-
-    for row_number in range(
-        start_row + 1,
-        ws.max_row + 1
-    ):
-
-        for column_number in [
-            3,
-            4,
-            5
-        ]:
-
-            ws.cell(
-                row=row_number,
-                column=column_number
-            ).number_format = (
-                "#,##0.00"
-            )
-
-        for column_number in [
-            6,
-            7
-        ]:
-
-            ws.cell(
-                row=row_number,
-                column=column_number
-            ).number_format = (
-                "0.00%"
-            )
-
-    # --------------------------------------------------------
-    # Regional Used Capacity chart
-    # --------------------------------------------------------
-
-    if len(summary) > 0:
-
-        chart = BarChart()
-
-        chart.type = "bar"
-        chart.style = 10
-
-        chart.title = (
-            "Regional Used Capacity"
-        )
-
-        chart.y_axis.title = "Region"
-
-        chart.x_axis.title = (
-            "Used Capacity (GB)"
-        )
-
-        chart_data = Reference(
-            ws,
-            min_col=4,
-            min_row=start_row,
-            max_row=(
-                start_row
-                + len(summary)
-            )
-        )
-
-        categories = Reference(
-            ws,
-            min_col=1,
-            min_row=start_row + 1,
-            max_row=(
-                start_row
-                + len(summary)
-            )
-        )
-
-        chart.add_data(
-            chart_data,
-            titles_from_data=True
-        )
-
-        chart.set_categories(
-            categories
-        )
-
-        chart.height = 8
-        chart.width = 15
-
-        ws.add_chart(
-            chart,
-            "I7"
-        )
-
-    # --------------------------------------------------------
-    # Forecast summary
-    # --------------------------------------------------------
-
-    if (
-        history_df is not None
-        and not history_df.empty
-    ):
-
-        forecast_df = build_forecast_table(
-            history_df
-        )
-
-        if not forecast_df.empty:
-
-            forecast_start = 22
-
-            ws.cell(
-                row=forecast_start,
-                column=1,
-                value="Forecast Summary"
-            )
-
-            ws.cell(
-                row=forecast_start,
-                column=1
-            ).font = Font(
-                bold=True,
-                size=14
-            )
-
-            forecast_headers = [
-                "Cluster",
-                "Used Capacity (GB)",
-                "Free Capacity (GB)",
-                "Average Daily Consumption (GB)",
-                "Estimated Days Until Exhaustion",
-                "Estimated Exhaustion Date",
-                "Threshold Status"
-            ]
-
-            header_row = (
-                forecast_start + 1
-            )
-
-            for column_number, header in enumerate(
-                forecast_headers,
-                start=1
-            ):
-
-                cell = ws.cell(
-                    row=header_row,
-                    column=column_number,
-                    value=header
-                )
-
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.border = BORDER
-
-            # ------------------------------------------------
-            # Match current data for status
-            # ------------------------------------------------
-
-            status_map = {}
-
-            for _, row in df.iterrows():
-
-                status_map[
-                    str(
-                        row["Target Storage"]
-                    )
-                ] = row[
-                    "Threshold Status"
+            is_percent = (
+                "Capacity (%)" in column
+                or column in [
+                    "TH High",
+                    "TH Medium",
+                    "TH Low"
                 ]
-
-            for row_offset, (_, row) in enumerate(
-                forecast_df.iterrows(),
-                start=1
-            ):
-
-                row_number = (
-                    header_row
-                    + row_offset
-                )
-
-                cluster = str(
-                    row["Cluster"]
-                )
-
-                values = [
-                    cluster,
-                    row.get(
-                        "Latest Used Capacity (GB)"
-                    ),
-                    row.get(
-                        "Latest Free Capacity (GB)"
-                    ),
-                    row.get(
-                        "Average Daily Consumption (GB)"
-                    ),
-                    row.get(
-                        "Estimated Days Until Exhaustion"
-                    ),
-                    row.get(
-                        "Estimated Exhaustion Date"
-                    ),
-                    status_map.get(
-                        cluster,
-                        "Unknown"
-                    )
-                ]
-
-                for column_number, value in enumerate(
-                    values,
-                    start=1
-                ):
-
-                    cell = ws.cell(
-                        row=row_number,
-                        column=column_number,
-                        value=value
-                    )
-
-                    cell.border = BORDER
-
-            # ------------------------------------------------
-            # Forecast number formats
-            # ------------------------------------------------
-
-            for row_number in range(
-                header_row + 1,
-                ws.max_row + 1
-            ):
-
-                ws.cell(
-                    row=row_number,
-                    column=2
-                ).number_format = (
-                    "#,##0.00"
-                )
-
-                ws.cell(
-                    row=row_number,
-                    column=3
-                ).number_format = (
-                    "#,##0.00"
-                )
-
-                ws.cell(
-                    row=row_number,
-                    column=4
-                ).number_format = (
-                    "#,##0.00"
-                )
-
-                ws.cell(
-                    row=row_number,
-                    column=5
-                ).number_format = (
-                    "0.0"
-                )
-
-    # --------------------------------------------------------
-    # Historical growth trend chart
-    #
-    # Only created when at least two dates exist.
-    # --------------------------------------------------------
-
-    if (
-        history_df is not None
-        and not history_df.empty
-        and "Date" in history_df.columns
-    ):
-
-        history = history_df.copy()
-
-        history["Date"] = pd.to_datetime(
-            history["Date"],
-            errors="coerce"
-        )
-
-        history = history.dropna(
-            subset=["Date"]
-        )
-
-        if history["Date"].nunique() >= 2:
-
-            trend = (
-                history
-                .groupby("Date")[
-                    "Used Capacity (GB)"
-                ]
-                .sum()
-                .reset_index()
-                .sort_values("Date")
             )
 
-            trend_start = 22
-
-            # Put trend data to the right side.
-            trend_col = 9
-
-            ws.cell(
-                row=trend_start,
-                column=trend_col,
-                value="Date"
-            )
-
-            ws.cell(
-                row=trend_start,
-                column=trend_col + 1,
-                value="Total Used Capacity (GB)"
-            )
-
-            for cell in ws[
-                trend_start
-            ][
-                trend_col - 1:
-                trend_col + 1
-            ]:
-
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.border = BORDER
-
-            for offset, (_, row) in enumerate(
-                trend.iterrows(),
-                start=1
-            ):
-
-                row_number = (
-                    trend_start
-                    + offset
-                )
-
-                ws.cell(
-                    row=row_number,
-                    column=trend_col,
-                    value=row["Date"]
-                )
-
-                ws.cell(
-                    row=row_number,
-                    column=trend_col + 1,
-                    value=row[
-                        "Used Capacity (GB)"
-                    ]
-                )
-
-            chart = LineChart()
-
-            chart.title = (
-                "Capacity Growth Trend"
-            )
-
-            chart.y_axis.title = (
-                "Used Capacity (GB)"
-            )
-
-            chart.x_axis.title = (
-                "Date"
-            )
-
-            chart.height = 8
-            chart.width = 16
-
-            chart_data = Reference(
+            write_cell(
                 ws,
-                min_col=trend_col + 1,
-                min_row=trend_start,
-                max_row=(
-                    trend_start
-                    + len(trend)
-                )
-            )
-
-            chart_categories = Reference(
-                ws,
-                min_col=trend_col,
-                min_row=trend_start + 1,
-                max_row=(
-                    trend_start
-                    + len(trend)
-                )
-            )
-
-            chart.add_data(
-                chart_data,
-                titles_from_data=True
-            )
-
-            chart.set_categories(
-                chart_categories
-            )
-
-            ws.add_chart(
-                chart,
-                "I40"
+                row_number,
+                column_number,
+                value,
+                percent=is_percent
             )
 
     # --------------------------------------------------------
@@ -1216,16 +738,24 @@ def create_global_view(
     # --------------------------------------------------------
 
     widths = {
-        "A": 18,
-        "B": 15,
-        "C": 22,
-        "D": 22,
-        "E": 22,
-        "F": 20,
-        "G": 20,
-        "I": 18,
-        "J": 22,
-        "K": 18
+        "A": 14,
+        "B": 12,
+        "C": 12,
+        "D": 40,
+        "E": 16,
+        "F": 18,
+        "G": 12,
+        "H": 16,
+        "I": 20,
+        "J": 20,
+        "K": 20,
+        "L": 20,
+        "M": 18,
+        "N": 18,
+        "O": 12,
+        "P": 12,
+        "Q": 12,
+        "R": 12
     }
 
     for column, width in widths.items():
@@ -1234,13 +764,38 @@ def create_global_view(
             column
         ].width = width
 
-    ws.freeze_panes = "A7"
+    # --------------------------------------------------------
+    # Excel table
+    # --------------------------------------------------------
+
+    if ws.max_row >= 2:
+
+        table = Table(
+            displayName="TblRawData",
+            ref=ws.dimensions
+        )
+
+        style = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False
+        )
+
+        table.tableStyleInfo = style
+
+        ws.add_table(
+            table
+        )
+
+    ws.freeze_panes = "A2"
 
     return ws
 
 
 # ============================================================
-# GENERATE DAILY EXCEL REPORT
+# GENERATE DAILY REPORT
 # ============================================================
 
 def generate_daily_report(
@@ -1248,8 +803,13 @@ def generate_daily_report(
     history_df=None
 ):
 
+    print()
+    print("=" * 70)
+    print("Generating Daily Excel Report")
+    print("=" * 70)
+
     # --------------------------------------------------------
-    # Create output directory
+    # Output directory
     # --------------------------------------------------------
 
     os.makedirs(
@@ -1258,28 +818,114 @@ def generate_daily_report(
     )
 
     # --------------------------------------------------------
-    # Build growth / forecast table
-    # --------------------------------------------------------
-
-    forecast_df = pd.DataFrame()
-
-    if (
-        history_df is not None
-        and not history_df.empty
-    ):
-
-        forecast_df = build_forecast_table(
-            history_df
-        )
-
-    # --------------------------------------------------------
-    # Prepare current data
+    # Prepare current snapshot
     # --------------------------------------------------------
 
     data = prepare_dataframe(
-        df,
-        forecast_df
+        df
     )
+
+    report_date = data.iloc[0]["Date"]
+
+    print(
+        f"Report Date : {report_date}"
+    )
+
+    print(
+        f"Clusters    : {len(data)}"
+    )
+
+    # --------------------------------------------------------
+    # Create workbook
+    # --------------------------------------------------------
+
+    wb = Workbook()
+
+    default_sheet = wb.active
+
+    wb.remove(
+        default_sheet
+    )
+
+    # --------------------------------------------------------
+    # Regional sheets
+    # --------------------------------------------------------
+
+    regions = [
+        "NA",
+        "LATAM",
+        "EU",
+        "APAC",
+        "CHINA"
+    ]
+
+    for region in regions:
+
+        if region == "CHINA":
+
+            region_data = data[
+                data["Country"]
+                .astype(str)
+                .str.upper()
+                .eq("CHINA")
+            ].copy()
+
+        elif region == "NA_DD":
+
+            region_data = data.iloc[
+                0:0
+            ].copy()
+
+        else:
+
+            region_data = data[
+                data["Region"]
+                .astype(str)
+                .str.upper()
+                .eq(region)
+            ].copy()
+
+        print(
+            f"{region:<8}: "
+            f"{len(region_data)} clusters"
+        )
+
+        create_region_sheet(
+            wb,
+            region_data,
+            region,
+            report_date
+        )
+
+    # --------------------------------------------------------
+    # Raw Data
+    # --------------------------------------------------------
+
+    create_raw_data_sheet(
+        wb,
+        data
+    )
+
+    # --------------------------------------------------------
+    # Sheet order
+    #
+    # NO GLOBAL VIEW
+    # --------------------------------------------------------
+
+    desired_order = [
+        "NA",
+        "LATAM",
+        "EU",
+        "APAC",
+        "CHINA",
+        "Raw Data"
+    ]
+
+    wb._sheets = [
+        wb[name]
+        for name in desired_order
+        if name in wb.sheetnames
+    ]
 
     # --------------------------------------------------------
     # File name
@@ -1297,101 +943,6 @@ def generate_daily_report(
     )
 
     # --------------------------------------------------------
-    # Create workbook
-    # --------------------------------------------------------
-
-    wb = Workbook()
-
-    default_sheet = wb.active
-
-    wb.remove(
-        default_sheet
-    )
-
-    # --------------------------------------------------------
-    # Global View
-    # --------------------------------------------------------
-
-    create_global_view(
-        wb,
-        data,
-        history_df
-    )
-
-    # --------------------------------------------------------
-    # Regional sheets
-    # --------------------------------------------------------
-
-    regions = [
-        "NA",
-        "NA_DD",
-        "LATAM",
-        "EU",
-        "APAC",
-        "CHINA"
-    ]
-
-    for region in regions:
-
-        if region == "CHINA":
-
-            region_df = data[
-                data["Country"]
-                .astype(str)
-                .str.upper()
-                .eq("CHINA")
-            ]
-
-        elif region == "NA_DD":
-
-            region_df = data.iloc[0:0]
-
-        else:
-
-            region_df = data[
-                data["Region"]
-                .astype(str)
-                .str.upper()
-                .eq(region)
-            ]
-
-        create_region_sheet(
-            wb,
-            region_df,
-            region
-        )
-
-    # --------------------------------------------------------
-    # Raw Data
-    # --------------------------------------------------------
-
-    create_raw_data_sheet(
-        wb,
-        data
-    )
-
-    # --------------------------------------------------------
-    # Workbook order
-    # --------------------------------------------------------
-
-    desired_order = [
-        "Global View",
-        "NA",
-        "NA_DD",
-        "LATAM",
-        "EU",
-        "APAC",
-        "CHINA",
-        "Raw Data"
-    ]
-
-    wb._sheets = [
-        wb[name]
-        for name in desired_order
-        if name in wb.sheetnames
-    ]
-
-    # --------------------------------------------------------
     # Save
     # --------------------------------------------------------
 
@@ -1400,12 +951,8 @@ def generate_daily_report(
     )
 
     # --------------------------------------------------------
-    # Verify
+    # Verification
     # --------------------------------------------------------
-
-    file_exists = os.path.exists(
-        report_path
-    )
 
     print()
     print("=" * 70)
@@ -1417,16 +964,7 @@ def generate_daily_report(
     )
 
     print(
-        f"Absolute Path   : "
-        f"{os.path.abspath(report_path)}"
-    )
-
-    print(
         f"Clusters        : {len(data)}"
-    )
-
-    print(
-        f"File Exists     : {file_exists}"
     )
 
     print(
@@ -1434,6 +972,11 @@ def generate_daily_report(
         + ", ".join(
             wb.sheetnames
         )
+    )
+
+    print(
+        f"File Exists     : "
+        f"{os.path.exists(report_path)}"
     )
 
     print("=" * 70)
